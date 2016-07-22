@@ -9,7 +9,6 @@ private:
 	PROCESS_INFORMATION pi;
 	vector<int> setbs; //breakpoint用のやつ(どのか)
 	void settrap();
-	void outcontext();
 	void debugexception(DWORD debe,void (*breaklistener)(int));
 	void createdprocess();
 	void closedprocess();
@@ -23,6 +22,7 @@ public:
 	void unsetbreak(int p); //0～3のみ
 	void listen(void (*breaklistener)(int));
 	//break時に、仕掛けたポインタの値が入ってくる。
+	void outcontext();
 };
 
 #endif

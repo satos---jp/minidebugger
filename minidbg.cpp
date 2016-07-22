@@ -28,6 +28,7 @@ void debugger::init(){
 void debugger::run(LPSTR procname){
 	setbs.clear();
 	STARTUPINFO si = {};
+	/*
 	WCHAR procdir[256];
 	lstrcpyn((LPSTR)procdir,procname,256);
 	//256文字。
@@ -43,10 +44,11 @@ void debugger::run(LPSTR procname){
 		procdir[0]='/';
 		procdir[1]='\0';
 	}		
+	*/
 	
 	BOOL bcre = CreateProcess(NULL,procname,NULL,NULL,FALSE,
 		DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS,
-		NULL,(LPSTR)procdir, &si, &pi);
+		NULL,(LPSTR)"./", &si, &pi);
 	//0x401280
 	//main .. 0x4013c0
 	if(bcre == FALSE){
@@ -131,7 +133,6 @@ void debugger::closedprocess(){
 }
 
 	
-	
 void debugger::debugexception(DWORD debe,void (*breaklistener)(int)){
 	CONTEXT ctx = { CONTEXT_CONTROL | CONTEXT_DEBUG_REGISTERS };
 	switch(debe){
@@ -158,16 +159,23 @@ void debugger::debugexception(DWORD debe,void (*breaklistener)(int)){
 			}
 			else {
 				printf("BreakPoint.  Dr6: 0x%08lX\n", ctx.Dr6);
+				rep(i,setbs.size()){
+					printf("%d ",setbs[i]);
+				}
+				printf(": setting break points\n");
 				bln=0;
 				outcontext();
-				ctx.Dr6 = 0x00000000; // DebugStatus はクリアされない
+				setbs.clear();
+				
 				rep(i,4){
 					if(ctx.Dr6 & (0x1<<i)){
 						bln |= (0x1<<i);
 						setbs.push_back(i);
-						ctx.Dr7 &= ~(0x1 << (i * 2));
+						ctx.Dr7 &= ~(0x1 << (i * 2)); //今回ぶつかったとこだけ外す。
 					}
 				}
+				ctx.Dr6 = 0x00000000; // DebugStatus はクリアされない
+				
 				SetThreadContext( pi.hThread, &ctx );
 				settrap();
 			}
@@ -184,6 +192,9 @@ void debugger::debugexception(DWORD debe,void (*breaklistener)(int)){
 	
 void debugger::listen(void (*breaklistener)(int)){
 	DEBUG_EVENT de = {};
+	
+	CHAR odstext[1024];
+	DWORD nbr;
 		
 	for(;;){
 		if(!WaitForDebugEvent(&de,INFINITE)){
@@ -219,6 +230,9 @@ void debugger::listen(void (*breaklistener)(int)){
 			break;
 		case OUTPUT_DEBUG_STRING_EVENT:
 			//8
+			ReadProcessMemory(pi.hProcess,(void*)de.u.DebugString.lpDebugStringData,
+				odstext,de.u.DebugString.nDebugStringLength,&nbr);
+			printf("[ODS]: %s\n",odstext);
 			break;
 		case EXCEPTION_DEBUG_EVENT:
 			//1
@@ -241,16 +255,38 @@ void debugger::listen(void (*breaklistener)(int)){
 	CloseHandle(pi.hThread);	
 }
 
+debugger de;
 
-void hoge(int p){
+void listener(int p){
 	printf("%d\n",p);
+	MessageBox(NULL,"happen","notifi",MB_OK);
+	de.outcontext();
+	/*
+	if(p==1){
+		de.unsetbreak(0);
+		de.setbreak(0x4306d1,1); //処理の、のに。
+	}
+	else if(p==2){
+		de.unsetbreak(1);
+		de.setbreak(0x4306d0,0); //処理の。
+	}
+	*/
 }
 
 int main(){
-	debugger de;
 	de.init();
-	de.run((LPSTR)"../specimen/x.exe");
-	de.listen(hoge);
+	/*
+	if(SetCurrentDirectory((LPCSTR)"../specimen/")==0){
+		printf("failed to change \n");
+		return 0;
+	}*/
+	de.run((LPSTR)"x.exe");
+	de.setbreak(0x4306d0,0); //処理の。
+	//de.setbreak(0x4306d1,1); //処理の、のに。
+	
+	
+	de.listen(listener);
+	
 	MessageBox(NULL,"finis debugging","notifi",MB_OK);
 	return 0;
 }
