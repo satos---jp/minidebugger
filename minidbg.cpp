@@ -57,9 +57,15 @@ void debugger::run(LPSTR procname){
 	}
 }
 	
-void debugger::getmemory(LPCVOID addr,LPVOID bufs,int len){
-	BOOL b = ReadProcessMemory(pi.hThread,addr,bufs,len*4,NULL);
-	if(!b)eprintf("failed to read memory\n");
+void debugger::getmemory(LPCVOID addr,LPVOID bufs,size_t len){
+	//DWORD oldprotect,x;
+	BOOL b;
+	//b = VirtualProtectEx(pi.hProcess,(LPVOID)addr,len*2,PAGE_EXECUTE_WRITECOPY,&oldprotect);
+	//if(!b)eprintf("failed to change protect\n");
+	b = ReadProcessMemory(pi.hProcess,addr,bufs,len,NULL);
+	if(!b)eprintf("failed to read memory %x\n",GetLastError());
+	//b = VirtualProtectEx(pi.hProcess,(LPVOID)addr,len*2,oldprotect,&x);
+	//if(!b)eprintf("failed to change protect\n");
 }
 	
 void debugger::outcontext(){
@@ -68,6 +74,7 @@ void debugger::outcontext(){
 		CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL | CONTEXT_INTEGER;
 	GetThreadContext(pi.hThread,&ct);
 	
+	printf("----------------------------------------------------\n");
 	printf("eax .. %lx\n",ct.Eax);
 	printf("ebx .. %lx\n",ct.Ebx);
 	printf("ecx .. %lx\n",ct.Ecx);
@@ -79,8 +86,10 @@ void debugger::outcontext(){
 	printf("ebp .. %lx\n",ct.Ebp);	
 	
 	printf("eip .. %lx\n",ct.Eip);
+	printf("----------------------------------------------------\n");
 }
-	
+
+
 void debugger::settrap(){
 	//トラップフラグは、1度かかるとなくなるので再度建てること。
 	CONTEXT ct = {};
@@ -90,8 +99,34 @@ void debugger::settrap(){
 	ct.EFlags |= EFLAGS_TF;
 	SetThreadContext(pi.hThread,&ct);
 }
+
+
+breakdata::breakdata(){
+	addr = 0;
+}
+
+void breakdata::setDr7(DWORD& dr7,int idx){
+	if(addr==0)return;
+	dr7 |= (0x1 << (idx * 2));
+	dr7 |= ((type | (len<<2)) << ((idx * 4) + 16));
+}
+
+void breakdata::unsetDr7(DWORD& dr7,int idx){
+	if(addr==0)return;
+	dr7 &= ~(0x1 << (idx * 2));
+	dr7 &= ~(0xf << ((idx * 4) + 16));
+}
+
+void debugger::setrunbreak(DWORD dwAddress,int p){
+	setbreak(dwAddress,p,EXEC,LEN_BYTE);
+}
+
+
+void debugger::setbreak(DWORD dwAddress,int p,brktype type,brklen len){
+	brks[p].addr = dwAddress;
+	brks[p].type = type;
+	brks[p].len = len;
 	
-void debugger::setbreak(DWORD dwAddress,int p){
 	CONTEXT ctx = { CONTEXT_DEBUG_REGISTERS };
 	GetThreadContext( pi.hThread, &ctx );
 	
@@ -100,30 +135,22 @@ void debugger::setbreak(DWORD dwAddress,int p){
 	else if(p==2)ctx.Dr2 = dwAddress;
 	else if(p==3)ctx.Dr3 = dwAddress;
 	else eprintf("invalid break number %d\n",p);
-	
-	ctx.Dr7 |= (0x1 << (p * 2));
+
+	brks[p].setDr7(ctx.Dr7,p);
 	SetThreadContext( pi.hThread, &ctx );
 }
 
 void debugger::unsetbreak(int p){
 	CONTEXT ctx = { CONTEXT_DEBUG_REGISTERS };
 	GetThreadContext( pi.hThread, &ctx );
-	ctx.Dr7 &= ~(0x1 << (p * 2));
 	SetThreadContext( pi.hThread, &ctx );
-	vector<int> tbs;
-	rep(i,setbs.size()){
-		if(setbs[i]!=p)tbs.push_back(setbs[i]);
-	}
-	swap(tbs,setbs);
+	brks[p].addr = 0;
+	brks[p].unsetDr7(ctx.Dr7,p);
 }
 
-
 void debugger::createdprocess(){
-	printf("maked process\n");
 	outcontext();
-	//setbreak(0x4013d6);
-	//setbreak(0x430450);
-	//settrap();
+	printf("maked process\n");
 }
 	
 void debugger::closedprocess(){
@@ -132,55 +159,54 @@ void debugger::closedprocess(){
 	outcontext();
 }
 
+
+void debugger::catchbreak(void (*breaklistener)(int)){
+	CONTEXT ctx = { CONTEXT_CONTROL | CONTEXT_DEBUG_REGISTERS };
+	GetThreadContext( pi.hThread, &ctx );
+	
+	//printf("singl breaked %x %x\n",ctx.Dr6,ctx.Dr7);
+	int bln=-1;
+	if( ctx.Dr6 & 0x00004000 ) { 
+		// SingleStep フラグ
+		//printf("EIP: 0x%08lX\n", ctx.Eip );
+		rep(j,4){
+			//とりあえず、全部かけとく。
+			//printf("dr7 %x\n",ctx.Dr7);
+			brks[j].setDr7(ctx.Dr7,j);
+		}
+		SetThreadContext( pi.hThread, &ctx );
+	}
+	else {
+		//なにがしかの自ら設定したブレークポイントにかかってる。
+		//printf("BreakPoint.  Dr6: 0x%08lX\n", ctx.Dr6);
+		
+		//outcontext();
+
+		bln = 0;
+		rep(i,4){
+			if(ctx.Dr6 & (1<<i)){
+				bln |= (1<<i);
+				brks[i].unsetDr7(ctx.Dr7,i); //今回ぶつかったとこだけ外す。
+			}
+			//printf("dr7 %x\n",ctx.Dr7);
+		}
+		ctx.Dr6 = 0x00000000; // DebugStatus はクリアされない
+		
+		SetThreadContext( pi.hThread, &ctx );
+		settrap();
+	}
+	breaklistener(bln);
+	
+}
 	
 void debugger::debugexception(DWORD debe,void (*breaklistener)(int)){
-	CONTEXT ctx = { CONTEXT_CONTROL | CONTEXT_DEBUG_REGISTERS };
 	switch(debe){
 	case EXCEPTION_BREAKPOINT:
-		printf("exception breakpoint\n");
+		printf("exception breakpoint(aka. int3 )\n");
 		outcontext();
 		break;
 	case EXCEPTION_SINGLE_STEP:
-		printf("singl breaked\n");
-		//outcontext();
-		{
-			GetThreadContext( pi.hThread, &ctx );
-			int bln=-1;
-			if( ctx.Dr6 & 0x00004000 ) { // SingleStep フラグ
-				printf("EIP: 0x%08lX\n", ctx.Eip );
-				rep(j,setbs.size()){
-					CONTEXT ctx = { CONTEXT_DEBUG_REGISTERS };
-					GetThreadContext( pi.hThread, &ctx );
-					ctx.Dr7 |= (0x1 << (setbs[j] * 2));
-					SetThreadContext( pi.hThread, &ctx );
-				}
-				setbs.clear();
-				//setbreak(0x430450);
-			}
-			else {
-				printf("BreakPoint.  Dr6: 0x%08lX\n", ctx.Dr6);
-				rep(i,setbs.size()){
-					printf("%d ",setbs[i]);
-				}
-				printf(": setting break points\n");
-				bln=0;
-				outcontext();
-				setbs.clear();
-				
-				rep(i,4){
-					if(ctx.Dr6 & (0x1<<i)){
-						bln |= (0x1<<i);
-						setbs.push_back(i);
-						ctx.Dr7 &= ~(0x1 << (i * 2)); //今回ぶつかったとこだけ外す。
-					}
-				}
-				ctx.Dr6 = 0x00000000; // DebugStatus はクリアされない
-				
-				SetThreadContext( pi.hThread, &ctx );
-				settrap();
-			}
-			breaklistener(bln);
-		}
+		catchbreak(breaklistener);
 		break;
 	case EXCEPTION_ACCESS_VIOLATION:
 		break;
@@ -203,7 +229,9 @@ void debugger::listen(void (*breaklistener)(int)){
 		}
 		DWORD contst = DBG_CONTINUE;
 		//DWORD contst = DBG_EXCEPTION_NOT_HANDLED;
-		printf("debugvent ............... %lx\n",de.dwDebugEventCode);
+		if(de.dwDebugEventCode!=8 && de.dwDebugEventCode!=1){
+			//printf("debugvent ............... %lx\n",de.dwDebugEventCode);
+		}
 		switch(de.dwDebugEventCode){
 		case CREATE_PROCESS_DEBUG_EVENT:
 			//3
@@ -236,7 +264,7 @@ void debugger::listen(void (*breaklistener)(int)){
 			break;
 		case EXCEPTION_DEBUG_EVENT:
 			//1
-			printf("exception\n");
+			//printf("exception\n");
 			debugexception(de.u.Exception.ExceptionRecord.ExceptionCode,breaklistener);
 			break;
 		default:
@@ -255,40 +283,5 @@ void debugger::listen(void (*breaklistener)(int)){
 	CloseHandle(pi.hThread);	
 }
 
-debugger de;
-
-void listener(int p){
-	printf("%d\n",p);
-	MessageBox(NULL,"happen","notifi",MB_OK);
-	de.outcontext();
-	/*
-	if(p==1){
-		de.unsetbreak(0);
-		de.setbreak(0x4306d1,1); //処理の、のに。
-	}
-	else if(p==2){
-		de.unsetbreak(1);
-		de.setbreak(0x4306d0,0); //処理の。
-	}
-	*/
-}
-
-int main(){
-	de.init();
-	/*
-	if(SetCurrentDirectory((LPCSTR)"../specimen/")==0){
-		printf("failed to change \n");
-		return 0;
-	}*/
-	de.run((LPSTR)"x.exe");
-	de.setbreak(0x4306d0,0); //処理の。
-	//de.setbreak(0x4306d1,1); //処理の、のに。
-	
-	
-	de.listen(listener);
-	
-	MessageBox(NULL,"finis debugging","notifi",MB_OK);
-	return 0;
-}
 
 
